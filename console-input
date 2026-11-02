@@ -1,125 +1,133 @@
-if (window.location.origin !== "https://www.instagram.com") {
-  window.alert(
-    "Hey! You need to be on the instagram site before you run the code. " +
-    "I'm taking you there now but you're going to have to run the code into the console again.",
-  );
-  window.location.href = "https://www.instagram.com";
-  console.clear();
-}
-
-const SNAPSHOT_KEY = "ig_tracker_followers_snapshot";
-
-const fetchOptions = {
-  credentials: "include",
-  headers: { "X-IG-App-ID": "936619743392459" },
-  method: "GET",
-};
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const random = (min, max) => Math.floor(Math.random() * (max - min)) + min;
-
-const concatFriendshipsApiResponse = async (list, user_id, count, next_max_id = "") => {
-  let url = `https://www.instagram.com/api/v1/friendships/${user_id}/${list}/?count=${count}`;
-  if (next_max_id) url += `&max_id=${next_max_id}`;
-  const data = await fetch(url, fetchOptions).then((r) => r.json());
-  if (data.next_max_id) {
-    const timeToSleep = random(800, 1500);
-    console.log(`Loaded ${data.users.length} ${list}. Sleeping ${timeToSleep}ms to avoid rate limiting`);
-    await sleep(timeToSleep);
-    return data.users.concat(
-      await concatFriendshipsApiResponse(list, user_id, count, data.next_max_id)
+(async () => {
+  if (window.location.origin !== "https://www.instagram.com") {
+    window.alert(
+      "Hey! You need to be on the instagram site before you run the code. " +
+      "I'm taking you there now but you're going to have to run the code into the console again."
     );
+    window.location.href = "https://www.instagram.com";
+    return;
   }
-  return data.users;
-};
 
-const getFollowers = (user_id, count = 50) =>
-  concatFriendshipsApiResponse("followers", user_id, count);
+  // ↓ Replace with your Instagram username ↓
+  const username = "simranbhargava_";
 
-const getFollowing = (user_id, count = 50) =>
-  concatFriendshipsApiResponse("following", user_id, count);
+  const SNAPSHOT_KEY = "ig_tracker_followers_snapshot";
 
-const getUserId = async (username) => {
-  const lower = username.toLowerCase();
-  const url = `https://www.instagram.com/api/v1/web/search/topsearch/?context=blended&query=${lower}&include_reel=false`;
-  const data = await fetch(url, fetchOptions).then((r) => r.json());
-  const result = data.users?.find(
-    (r) => r.user.username.toLowerCase() === lower
-  );
-  return result?.user?.pk || null;
-};
-
-// --- Snapshot helpers (uses localStorage to persist between runs) ---
-
-const saveSnapshot = (followers) => {
-  const snapshot = {
-    timestamp: new Date().toISOString(),
-    followers: Array.from(followers),
+  const fetchOptions = {
+    credentials: "include",
+    headers: { "X-IG-App-ID": "936619743392459" },
+    method: "GET",
   };
-  localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
-};
 
-const loadSnapshot = () => {
-  const raw = localStorage.getItem(SNAPSHOT_KEY);
-  if (!raw) return null;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const random = (min, max) => Math.floor(Math.random() * (max - min)) + min;
+
+  const getJson = async (url) => {
+    const res = await fetch(url, fetchOptions);
+    if (!res.ok) {
+      throw new Error(`Request failed (${res.status}) for ${url}`);
+    }
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("json")) {
+      throw new Error(`Expected JSON but got ${contentType || "unknown"} for ${url}`);
+    }
+    return res.json();
+  };
+
+  const fetchAllFriendships = async (list, user_id, count = 50) => {
+    let users = [];
+    let nextMaxId = "";
+    do {
+      let url = `https://www.instagram.com/api/v1/friendships/${user_id}/${list}/?count=${count}`;
+      if (nextMaxId) url += `&max_id=${nextMaxId}`;
+      const data = await getJson(url);
+      users = users.concat(data.users || []);
+      nextMaxId = data.next_max_id || "";
+      if (nextMaxId) {
+        const timeToSleep = random(800, 1500);
+        console.log(`Loaded ${users.length} ${list} so far. Sleeping ${timeToSleep}ms to avoid rate limiting`);
+        await sleep(timeToSleep);
+      }
+    } while (nextMaxId);
+    return users;
+  };
+
+  const getUserId = async (username) => {
+    // Logged-in user's ID is stored in a cookie (works for your own account)
+    const cookieMatch = document.cookie.match(/ds_user_id=(\d+)/);
+    if (cookieMatch) return cookieMatch[1];
+
+    // Fallback: profile info endpoint
+    const data = await getJson(
+      `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`
+    );
+    return data?.data?.user?.id || null;
+  };
+
+  // --- Snapshot helpers (localStorage persists between runs) ---
+
+  const saveSnapshot = (followers) => {
+    localStorage.setItem(
+      SNAPSHOT_KEY,
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        followers: Array.from(followers),
+      })
+    );
+  };
+
+  const loadSnapshot = () => {
+    const raw = localStorage.getItem(SNAPSHOT_KEY);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+
+  // --- Main ---
+
   try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
+    const user_id = await getUserId(username);
+    if (!user_id) throw new Error(`Could not find user: ${username}`);
+
+    // Run sequentially (not in parallel) to be gentler on rate limits
+    const followers = await fetchAllFriendships("followers", user_id);
+    await sleep(random(800, 1500));
+    const following = await fetchAllFriendships("following", user_id);
+
+    const followerSet = new Set(followers.map((u) => u.username.toLowerCase()));
+    const followingSet = new Set(following.map((u) => u.username.toLowerCase()));
+
+    console.log("-".repeat(50));
+    console.log(`Fetched ${followerSet.size} followers and ${followingSet.size} following.`);
+
+    const notFollowingMeBack = [...followingSet].filter((u) => !followerSet.has(u));
+    const iDontFollowBack = [...followerSet].filter((u) => !followingSet.has(u));
+
+    const previousSnapshot = loadSnapshot();
+    let unfollowers = [];
+
+    if (previousSnapshot) {
+      const previousFollowerSet = new Set(previousSnapshot.followers);
+      unfollowers = [...previousFollowerSet].filter((u) => !followerSet.has(u));
+      console.log(`Snapshot from: ${previousSnapshot.timestamp}`);
+      console.log(`Previous follower count: ${previousFollowerSet.size}`);
+    } else {
+      console.log("No previous snapshot found. Run this script again later to detect unfollowers.");
+    }
+
+    saveSnapshot(followerSet);
+    console.log("Snapshot saved. Run again later to track unfollowers.");
+    console.log("-".repeat(50));
+
+    console.log({
+      PeopleNotFollowingMeBack: notFollowingMeBack,
+      PeopleIDontFollowBack: iDontFollowBack,
+      PeopleWhoUnfollowedMe: unfollowers,
+    });
+  } catch (err) {
+    console.error("Script failed:", err.message);
   }
-};
-
-// --- Main ---
-
-const getUserFriendshipStats = async (username) => {
-  const user_id = await getUserId(username);
-  if (!user_id) throw new Error(`Could not find user: ${username}`);
-
-  const [followers, following] = await Promise.all([
-    getFollowers(user_id),
-    getFollowing(user_id),
-  ]);
-
-  const followerSet = new Set(followers.map((u) => u.username.toLowerCase()));
-  const followingSet = new Set(following.map((u) => u.username.toLowerCase()));
-
-  console.log(Array(50).fill("-").join(""));
-  console.log(`Fetched ${followerSet.size} followers and ${followingSet.size} following.`);
-
-  // Who I follow that doesn't follow me back
-  const notFollowingMeBack = [...followingSet].filter((u) => !followerSet.has(u));
-
-  // People who follow me but I don't follow back
-  const iDontFollowBack = [...followerSet].filter((u) => !followingSet.has(u));
-
-  // Who unfollowed me since last snapshot
-  const previousSnapshot = loadSnapshot();
-  let unfollowers = [];
-
-  if (previousSnapshot) {
-    const previousFollowerSet = new Set(previousSnapshot.followers);
-    unfollowers = [...previousFollowerSet].filter((u) => !followerSet.has(u));
-    console.log(`Snapshot from: ${previousSnapshot.timestamp}`);
-    console.log(`Previous follower count: ${previousFollowerSet.size}`);
-  } else {
-    console.log(
-      "No previous snapshot found. Run this script again later to detect unfollowers.",
-    );
-  }
-
-  // Save current followers as the new snapshot
-  saveSnapshot(followerSet);
-  console.log("Snapshot saved. Run again later to track unfollowers.");
-  console.log(Array(50).fill("-").join(""));
-
-  return {
-    PeopleNotFollowingMeBack: notFollowingMeBack,
-    PeopleIDontFollowBack: iDontFollowBack,
-    PeopleWhoUnfollowedMe: unfollowers,
-  };
-};
-
-// ↓ Replace with your Instagram username ↓
-username = "example_username";
-
-getUserFriendshipStats(username).then(console.log);
+})();
